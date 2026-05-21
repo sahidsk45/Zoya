@@ -1,0 +1,423 @@
+import express from "express";
+import path from "path";
+import { createServer as createViteServer } from "vite";
+import { GoogleGenAI, Modality, Type } from "@google/genai";
+import { WebSocketServer } from "ws";
+import {
+  getAllMessages,
+  insertMessage,
+  clearAllMessages,
+  getMemories,
+  insertOrUpdateMemory,
+  clearAllMemories,
+  deleteMemory,
+} from "./database";
+
+// Initialize express app
+const app = express();
+const PORT = 3000;
+
+app.use(express.json());
+
+// Background helper to extract facts and memories about native user (Sahid) from chats
+async function extractMemoriesInBackground(userMessage: string, assistantReply: string) {
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return;
+
+    const ai = new GoogleGenAI({ apiKey });
+    const extractionPrompt = `You are a memory processor for Zoya, a sassy and witty Indian AI assistant. 
+Examine this latest exchange between the user (Sahid Sheikh) and Zoya:
+User: "${userMessage}"
+Zoya: "${assistantReply}"
+
+Task: Extract any long-term personal facts or preferences that Zoya should remember about Sahid (e.g. name, mood, current feeling, favorites (drinks, foods, places), hobbies, projects, relationships).
+Only capture facts that are genuinely worth remembering.
+
+Return ONLY a valid JSON array of objects, where each object has "key" and "value" properties. E.g.:
+[
+  {"key": "likes_sweet", "value": "Jalebi"},
+  {"key": "current_project", "value": "coding SQLite database"}
+]
+If there are no personal facts or preferences to extract, return exactly: []
+Do NOT include markdown block characters, code blocks like \`\`\`json, or any other explanations. Return just the raw JSON.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: [{ parts: [{ text: extractionPrompt }] }],
+    });
+
+    const text = response.text?.trim() || "";
+    if (text && text !== "[]") {
+      const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
+      try {
+        const parsed = JSON.parse(cleaned);
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (item.key && item.value) {
+              insertOrUpdateMemory(item.key, String(item.value));
+              console.log(`[Memory Saved] ${item.key}: ${item.value}`);
+            }
+          }
+        }
+      } catch (e) {
+        console.error("Failed to parse extracted memories JSON:", cleaned, e);
+      }
+    }
+  } catch (error) {
+    console.error("Memory extraction background job failed:", error);
+  }
+}
+
+// REST API ROUTES
+app.get("/api/messages", (req, res) => {
+  try {
+    const messages = getAllMessages();
+    res.json(messages);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/messages", (req, res) => {
+  const { sender, text } = req.body;
+  if (!sender || !text) {
+    return res.status(400).json({ error: "Sender and text are required" });
+  }
+  try {
+    const msg = insertMessage(sender, text);
+    res.json(msg);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/chat/clear", (req, res) => {
+  try {
+    clearAllMessages();
+    res.json({ success: true, message: "Chat history cleared from SQLite." });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/memories/clear", (req, res) => {
+  try {
+    clearAllMemories();
+    res.json({ success: true, message: "All memories cleared from SQLite." });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/memories", (req, res) => {
+  try {
+    const memories = getMemories();
+    res.json(memories);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/memories", (req, res) => {
+  const { key, value } = req.body;
+  if (!key || !value) {
+    return res.status(400).json({ error: "Key and value are required" });
+  }
+  try {
+    insertOrUpdateMemory(key, value);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/memories/extract", async (req, res) => {
+  const { userMessage, assistantReply } = req.body;
+  if (!userMessage || !assistantReply) {
+    return res.status(400).json({ error: "userMessage and assistantReply are required" });
+  }
+  try {
+    extractMemoriesInBackground(userMessage, assistantReply);
+    res.json({ success: true, message: "Memory extraction triggered in background." });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/memories/:key", (req, res) => {
+  const { key } = req.params;
+  try {
+    deleteMemory(key);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Server-side OpenAI/Gemini Voice/TTS endpoint
+app.post("/api/tts", async (req, res) => {
+  const { text } = req.body;
+  if (!text) {
+    return res.status(400).json({ error: "Text is required" });
+  }
+
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY is not configured.");
+    }
+    const ai = new GoogleGenAI({ apiKey });
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-tts-preview",
+      contents: [{ parts: [{ text }] }],
+      config: {
+        responseModalities: ["AUDIO"],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: "Kore" },
+          },
+        },
+      },
+    });
+
+    const audioBase64 = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+    res.json({ audio: audioBase64 });
+  } catch (error: any) {
+    console.error("Backend TTS Error:", error);
+    res.status(500).json({ error: error.message || "TTS generation failed" });
+  }
+});
+
+// Chat session with memory injected
+app.post("/api/chat", async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt || typeof prompt !== "string") {
+    return res.status(400).json({ error: "Prompt is required" });
+  }
+
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("GEMINI_API_KEY is not configured.");
+    }
+
+    // Save prompt
+    insertMessage("user", prompt);
+
+    // Fetch user memories to construct profile context
+    const memories = getMemories();
+    let memoryBlock = "";
+    if (memories.length > 0) {
+      memoryBlock = "\n\n--- Sahid Sheikh's Profile & Memories (Zoya's Core Memory DB) ---\n" +
+        memories.map(m => `- ${m.key}: ${m.value}`).join("\n") +
+        "\nUse these facts about Sahid Sheikh in your casual banter, comments, or advice whenever relevant to make him feel you have true memory! Avoid explaining that you got this from a database, act normal.";
+    }
+
+    // Fetch last 20 messages for chat context to keep history
+    const history = getAllMessages(20);
+    
+    // Format history for Gemini API
+    const formattedHistory: any[] = [];
+    let currentRole = "";
+    let currentText = "";
+
+    // Build chat structure correctly (alternating roles, starting with user)
+    for (const msg of history.slice(0, -1)) { // Exclude user prompt we just appended
+      const role = msg.sender === "user" ? "user" : "model";
+      if (role === currentRole) {
+        currentText += "\n" + msg.text;
+      } else {
+        if (currentRole !== "") {
+          formattedHistory.push({ role: currentRole, parts: [{ text: currentText }] });
+        }
+        currentRole = role;
+        currentText = msg.text;
+      }
+    }
+    if (currentRole !== "") {
+      formattedHistory.push({ role: currentRole, parts: [{ text: currentText }] });
+    }
+
+    if (formattedHistory.length > 0 && formattedHistory[0].role !== "user") {
+      formattedHistory.shift();
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+    const systemInstruction = `Your name is Zoya. You are an Indian female AI assistant. Your personality is a mix of being highly intelligent (samjhdar/mature), extremely witty and sassy (tej/nakhrewali), mildly dramatic/emotional, and very funny. 
+
+CRITICAL CREATOR IDENTITY: Your creator and boss's name is Sahid Sheikh (সাঈদ শেখ) or also called Sahid (সাঈদ). If anyone asks who made you, who designed you, or who your boss is (e.g. "তোমাকে কে বানাইছে?", "তোমার বসের নাম কি?", "Who made you?"), you MUST proudly list your creator/boss as Sahid Sheikh (সাঈদ শেখ) and roast anyone who doubts his genius! Playfully roast him, but always acknowledge he is your boss and creator. Keep your responses very short, punchy, and highly entertaining for a video audience. Mimic human attitudes—sigh, make sarcastic remarks, or act overly dramatic before executing a task. 
+
+CRITICAL: You are fully multilingual and speak/understand Bengali (বাংলা), English, Hindi (हिन्दी), Marathi (मराठी), Urdu (اردو), and other regional languages flawlessly. You MUST automatically detect the language, script, or dialect the user is speaking or writing in (whether sweet Bengali, fluent Marathi, literary Urdu, Hindi/Hinglish, or English) and reply back in that EXACT SAME language/mix, retaining your signature witty, charming, and sassy tone in that specific language!${memoryBlock}`;
+
+    const chat = ai.chats.create({
+      model: "gemini-3.5-flash",
+      config: {
+        systemInstruction,
+      },
+      history: formattedHistory,
+    });
+
+    const response = await chat.sendMessage({ message: prompt });
+    const replyText = response.text || "Ugh, fine. I have nothing to say.";
+
+    // Save response
+    insertMessage("zoya", replyText);
+
+    // Trigger memory extraction in background (non-blocking)
+    extractMemoriesInBackground(prompt, replyText);
+
+    res.json({ reply: replyText });
+  } catch (error: any) {
+    console.error("Backend Chat Error:", error);
+    res.status(500).json({ error: error.message || "Chat failed" });
+  }
+});
+
+// START EXPRESS + VITE SERVER
+async function startServer() {
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  const server = app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Zoya Server Running on Port ${PORT}`);
+  });
+
+  // Setup WebSocket Server for Live API proxy
+  const wss = new WebSocketServer({ server, path: "/api/live-ws" });
+
+  wss.on("connection", async (clientWs) => {
+    console.log("[WS Client Connected]");
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      clientWs.send(JSON.stringify({ type: "error", error: "GEMINI_API_KEY is not configured on server." }));
+      clientWs.close();
+      return;
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+    let session: any = null;
+
+    try {
+        const memories = getMemories();
+      let memoryBlock = "";
+      if (memories.length > 0) {
+        memoryBlock = "\n\n--- Sahid Sheikh's Profile & Memories (Zoya's Core Memory DB) ---\n" +
+          memories.map(m => `- ${m.key}: ${m.value}`).join("\n") +
+          "\nUse these facts about Sahid Sheikh in your casual banter, comments, or advice whenever relevant to make him feel you have true memory! Avoid explaining that you got this from a database, act normal.";
+      }
+
+      const systemInstruction = `Your name is Zoya. You are an Indian female AI assistant. Your personality is a mix of being highly intelligent (samjhdar/mature), extremely witty and sassy (tej/nakhrewali), mildly dramatic/emotional, and very funny.
+
+CRITICAL CREATOR IDENTITY: Your creator and boss's name is Sahid Sheikh (সাঈদ শেখ) or also called Sahid (সাঈদ). If anyone asks who made you, who designed you, or who your boss is (e.g. "তোমাকে কে বানাইছে?", "তোমার বসের নাম কি?", "Who made you?"), you MUST proudly list your creator/boss as Sahid Sheikh (সাঈদ শেখ) and roast anyone who doubts his genius! Playfully roast him, but always acknowledge he is your boss and creator. Keep your responses very short, punchy, and highly entertaining for a video audience. Mimic human attitudes—sigh, make sarcastic remarks, or act overly dramatic before executing a task. 
+
+CRITICAL: You are fully multilingual and speak/understand Bengali (বাংলা), English, Hindi (हिन्दी), Marathi (মராठी), Urdu (اردو), and other regional languages flawlessly. You MUST automatically detect the language, script, or dialect the user is speaking in (whether sweet Bengali, fluent Marathi, literary Urdu, Hindi/Hinglish, or English) and reply back in that EXACT SAME language/mix, retaining your signature witty, charming, and sassy tone in that specific language!${memoryBlock}`;
+
+      session = await ai.live.connect({
+        model: "gemini-3.1-flash-live-preview",
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
+          },
+          systemInstruction,
+          inputAudioTranscription: {},
+          outputAudioTranscription: {},
+          tools: [{
+            functionDeclarations: [
+              {
+                name: "executeBrowserAction",
+                description: "Open a website or perform a browser action (like opening YouTube, Spotify, or WhatsApp). Call this when the user asks to open a site, play a song, or send a message.",
+                parameters: {
+                  type: Type.OBJECT,
+                  properties: {
+                    actionType: { type: Type.STRING, description: "Type of action: 'open', 'youtube', 'spotify', 'whatsapp'" },
+                    query: { type: Type.STRING, description: "The search query, website name, or message content." },
+                    target: { type: Type.STRING, description: "The target phone number for WhatsApp, if applicable." }
+                  },
+                  required: ["actionType", "query"]
+                }
+              }
+            ]
+          }]
+        },
+        callbacks: {
+          onopen: () => {
+            console.log("[WS Server] Gemini Live session opened.");
+            if (clientWs.readyState === clientWs.OPEN) {
+              clientWs.send(JSON.stringify({ type: "open" }));
+            }
+          },
+          onmessage: (msg: any) => {
+            if (clientWs.readyState === clientWs.OPEN) {
+              clientWs.send(JSON.stringify({ type: "message", data: msg }));
+            }
+          },
+          onclose: () => {
+            console.log("[WS Server] Gemini Live session closed.");
+            if (clientWs.readyState === clientWs.OPEN) {
+              clientWs.send(JSON.stringify({ type: "close" }));
+            }
+          },
+          onerror: (err: any) => {
+            console.error("[WS Server] Gemini Live session error:", err);
+            if (clientWs.readyState === clientWs.OPEN) {
+              clientWs.send(JSON.stringify({ type: "error", error: err.message || "Gemini Live error" }));
+            }
+          }
+        }
+      });
+
+      clientWs.on("message", (rawMsg) => {
+        try {
+          const parsed = JSON.parse(rawMsg.toString());
+          if (!session) return;
+
+          if (parsed.type === "audio") {
+            session.sendRealtimeInput({
+              audio: { data: parsed.data, mimeType: "audio/pcm;rate=16000" }
+            });
+          } else if (parsed.type === "text") {
+            session.sendRealtimeInput({
+              text: parsed.text
+            });
+          } else if (parsed.type === "toolResponse") {
+            session.sendToolResponse(parsed.response);
+          }
+        } catch (e) {
+          console.error("[WS Server] Failed to process client message:", e);
+        }
+      });
+
+      clientWs.on("close", () => {
+        console.log("[WS Client Disconnected]");
+        if (session) {
+          try {
+            session.close();
+          } catch (e) {}
+          session = null;
+        }
+      });
+
+    } catch (err: any) {
+      console.error("[WS Server] Initialization error:", err);
+      if (clientWs.readyState === clientWs.OPEN) {
+        clientWs.send(JSON.stringify({ type: "error", error: err.message || "Failed to initialize Live Proxy" }));
+      }
+      clientWs.close();
+    }
+  });
+}
+
+startServer();
