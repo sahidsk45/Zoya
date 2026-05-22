@@ -126,7 +126,7 @@ export async function createCalendarEvent(
   const url = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
   const body = {
     summary,
-    description: description || "Scheduled by Zoya Sassy Assistant",
+    description: description || "Scheduled by Gimi Sassy Assistant",
     start: {
       dateTime: startDt.toISOString(),
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,

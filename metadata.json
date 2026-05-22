@@ -1,6 +1,6 @@
 {
-  "name": "Remix: Zoya - AI Voice Assistant",
-  "description": "A sassy, witty, and intelligent Indian female AI voice assistant.",
+  "name": "Remix: Gimi - AI Voice Assistant",
+  "description": "A sassy, witty, and intelligent Indian female AI voice assistant named Gimi.",
   "requestFramePermissions": [
     "microphone",
     "camera"

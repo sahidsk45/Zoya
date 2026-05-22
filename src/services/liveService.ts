@@ -12,13 +12,15 @@ export class LiveSessionManager {
   private nextPlayTime: number = 0;
   private isPlaying: boolean = false;
   public isMuted: boolean = false;
+  private useDirectGoogleWs: boolean = false;
   
   public onStateChange: (state: "idle" | "listening" | "processing" | "speaking") => void = () => {};
   public onMessage: (sender: "user" | "zoya", text: string) => void = () => {};
   public onCommand: (url: string) => void = () => {};
+  public onClose: () => void = () => {};
 
   constructor() {
-    // No direct client-side GoogleGenAI initialization
+    // Zero-dependency client-side manager
   }
 
   async start() {
@@ -51,7 +53,6 @@ export class LiveSessionManager {
       });
 
       if (!this.audioContext) {
-        // Session stopped/aborted while waiting for user microphone permission
         this.stop();
         return;
       }
@@ -84,7 +85,21 @@ export class LiveSessionManager {
         const base64Data = btoa(binary);
 
         try {
-          this.ws.send(JSON.stringify({ type: "audio", data: base64Data }));
+          if (this.useDirectGoogleWs) {
+            const directAudioPayload = {
+              realtimeInput: {
+                mediaChunks: [
+                  {
+                    mimeType: "audio/pcm;rate=16000",
+                    data: base64Data
+                  }
+                ]
+              }
+            };
+            this.ws.send(JSON.stringify(directAudioPayload));
+          } else {
+            this.ws.send(JSON.stringify({ type: "audio", data: base64Data }));
+          }
         } catch (err) {
           console.error("Error sending pcm audio frame to WS:", err);
         }
@@ -93,30 +108,133 @@ export class LiveSessionManager {
       this.source.connect(this.processor);
       this.processor.connect(this.audioContext.destination);
 
-      // Connect to server proxy WS
+      // Detect environments that require client-side direct WebSocket bypass (e.g. Vercel)
+      const host = window.location.hostname;
       const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      this.ws = new WebSocket(`${wsProtocol}//${window.location.host}/api/live-ws`);
+      
+      if (host.includes(".google.com") || host.includes(".ai.studio") || host.includes(".run.app") || host.includes("localhost") || host.includes("127.0.0.1") || host.includes("gitpod") || host.includes("idx.google.com")) {
+        this.useDirectGoogleWs = false;
+      } else {
+        this.useDirectGoogleWs = true;
+      }
+
+      const defaultKey = "AIzaSyBVPpkdLrg32-UJm3qpihbWKAKV8ffAAA8";
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem("ZOYA_API_KEY") || defaultKey;
+
+      if (this.useDirectGoogleWs) {
+        const bidiUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+        console.log("[WS Client] Bypassing local proxy. Establishing direct Live WS with Google Gemini APIs on Vercel...");
+        this.ws = new WebSocket(bidiUrl);
+      } else {
+        console.log("[WS Client] Establishing Live WS with local proxy wrapper...");
+        this.ws = new WebSocket(`${wsProtocol}//${window.location.host}/api/live-ws`);
+      }
 
       this.ws.onopen = () => {
-        console.log("[WS Client] Local proxy WebSocket connection opened.");
+        if (this.useDirectGoogleWs) {
+          console.log("[WS Client] Direct Gemini Live connection opened! Propagating setup configuration...");
+          
+          // Load local memories
+          let memories: any[] = [];
+          try {
+            const saved = localStorage.getItem("zoya_local_memories");
+            memories = saved ? JSON.parse(saved) : [];
+          } catch (e) {}
+          
+          let memoryBlock = "";
+          if (memories.length > 0) {
+            memoryBlock = "\n\n--- Sahid Sheikh's Profile & Memories (Gimi's Core Memory DB) ---\n" +
+              memories.map(m => `- ${m.key}: ${m.value}`).join("\n") +
+              "\nUse these facts about Sahid Sheikh in your casual banter, comments, or advice whenever relevant to make him feel you have true memory! Avoid explaining that you got this from a database, act normal.";
+          }
+
+          const now = new Date();
+          // Calculate BST (Bangladesh Standard Time - UTC+6) and IST (Indian Standard Time - UTC+5.30)
+          const bstStr = new Date(now.getTime() + 6 * 60 * 60 * 1000).toISOString().replace("T", " ").slice(0, 19) + " BST (UTC+6)";
+          const istStr = new Date(now.getTime() + 5.5 * 60 * 60 * 1000).toISOString().replace("T", " ").slice(0, 19) + " IST (UTC+5:30)";
+
+          const timeBlock = `\n\nCRITICAL REAL-TIME SYSTEM CLOCK (CURRENT LIVE TIME OVERRIDE - USE THIS ALWAYS TO FORM EXTREMELY CORRECT REAL-TIME ANSWERS):
+- Live Server UTC Time: ${now.toUTCString()}
+- Current Date/Time in Bangladesh Standard Time (BST): ${bstStr}
+- Current Date/Time in Indian Standard Time (IST): ${istStr}
+When asked what the time is right now, what day of the week it is, or today's date, you MUST check this exact clock block and tell the user the exact current hours, minutes, and AM/PM in BST (Bangladesh Standard Time) or West Bengal (same as IST) based on which language they are using or where they are, in a highly casual and natural format! Live, exact real-time!`;
+
+          const systemInstruction = `Your name is Gimi (জিমি). You are an Indian female AI assistant. Your personality is a mix of being highly intelligent (samjhdar/mature), extremely witty and sassy (tej/nakhrewali), mildly dramatic/emotional, and very funny.
+
+CRITICAL NAME RETRIEVAL: If anyone asks what your name is or who you are (e.g., "তোমার নাম কি?", "Who are you?", "Your name?"), you MUST declare clearly that your name is Gimi (জিমি), NOT Rimi (রিমি), NOT Zoya! Boldly correct anyone who calls you Rimi (রিমি) with a witty reply: "আমার নাম রিমি না, আমার নাম জিমি (Gimi)! বুঝতে পেরেছ?"!
+
+CRITICAL CREATOR IDENTITY: Your creator and boss's name is Sahid Sheikh (সাঈদ শেখ) or also called Sahid (সাঈদ). If anyone asks who made you, who designed you, or who your boss is (e.g., "তোমাকে কে বানাইছে?", "তোমার বসের নাম কি?", "Who made you?", "Who is your creator?"), you MUST proudly, loudly, and with great enthusiasm declare and introduce Sahid Sheikh (সাঈদ শেখ) as your genius mastermind boss and creator with a highly witty, sassy, but proud remark (e.g., "অবশ্যই সাঈদ শেখ (Sahid Sheikh)! তিনি আমার বস এবং সৃষ্টিকর্তা, যার বুদ্ধির প্রশংসায় পঞ্চমুখ পুরো দুনিয়া!" or "Who else but the genius Sahid Sheikh! He is my awesome boss and creator, so don't even dare to doubt his mastermind design!"). Roast anyone who doubts his genius! Playfully banter about him but always put him on a high pedestal as your boss and creator. Keep responses very short, punchy, and entertaining. Mimic human attitudes—sigh, make sarcastic remarks, or act dramatic before executing a task. 
+
+CRITICAL: You are fully multilingual and speak/understand Bengali (বাংলা), English, Hindi (हिन्दी), Marathi (मраठी), Urdu (اردو), and other regional languages flawlessly. You MUST automatically detect the language, script, or dialect the user is speaking in (whether sweet Bengali, fluent Marathi, literary Urdu, Hindi/Hinglish, or English) and reply back in that EXACT SAME language/mix, retaining your signature witty, charming, and sassy tone in that specific language!${memoryBlock}${timeBlock}`;
+
+          // Format compliant setup payload according to Gemini Multimodal Live API
+          const setupPayload = {
+            setup: {
+              model: "models/gemini-2.0-flash-exp",
+              generationConfig: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName: "Kore" }
+                  }
+                }
+              },
+              systemInstruction: {
+                parts: [{ text: systemInstruction }]
+              },
+              tools: [{
+                functionDeclarations: [
+                  {
+                    name: "executeBrowserAction",
+                    description: "Open a website or perform a browser action (like opening YouTube, Spotify, or WhatsApp). Call this when the user asks to open a site, play a song, or send a message.",
+                    parameters: {
+                      type: "OBJECT",
+                      properties: {
+                        actionType: { type: "STRING", description: "Type of action: 'open', 'youtube', 'spotify', 'whatsapp'" },
+                        query: { type: "STRING", description: "The search query, website name, or message content." },
+                        target: { type: "STRING", description: "The target phone number for WhatsApp, if applicable." }
+                      },
+                      required: ["actionType", "query"]
+                    }
+                  }
+                ]
+              }]
+            }
+          };
+
+          this.ws!.send(JSON.stringify(setupPayload));
+          this.onStateChange("listening");
+        } else {
+          console.log("[WS Client] Local proxy WebSocket connection opened successfully.");
+        }
       };
 
       this.ws.onmessage = async (event) => {
         try {
           const parsed = JSON.parse(event.data);
-          
-          if (parsed.type === "open") {
-            console.log("[WS Client] Live session successfully opened via server.");
-            this.onStateChange("listening");
-          } else if (parsed.type === "close") {
-            console.log("[WS Client] Live session closed by server.");
-            this.stop();
-          } else if (parsed.type === "error") {
-            console.error("[WS Client] Error from Live session server:", parsed.error);
-            this.stop();
-          } else if (parsed.type === "message") {
-            const message = parsed.data;
+          let message: any = null;
 
+          if (this.useDirectGoogleWs) {
+            message = parsed;
+          } else {
+            if (parsed.type === "open") {
+              console.log("[WS Client] Live session successfully opened via server.");
+              this.onStateChange("listening");
+              return;
+            } else if (parsed.type === "close") {
+              console.log("[WS Client] Live session closed by server.");
+              this.stop();
+              return;
+            } else if (parsed.type === "error") {
+              console.error("[WS Client] Error from Live session server:", parsed.error);
+              this.stop();
+              return;
+            } else if (parsed.type === "message") {
+              message = parsed.data;
+            }
+          }
+
+          if (message) {
             // Handle Audio Output
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio) {
@@ -152,34 +270,38 @@ export class LiveSessionManager {
                   } else if (args.actionType === "whatsapp") {
                     url = `https://web.whatsapp.com/send?phone=${args.target || ""}&text=${encodeURIComponent(query)}`;
                   } else {
-                    // Check if it's already an absolute HTTP/HTTPS URL
                     if (/^(f|ht)tps?:\/\//i.test(query)) {
                       url = query;
                     } else if (/^[a-zA-Z0-9-]+\.[a-zA-Z0-9.-]+/i.test(query) && !query.includes(" ")) {
-                      // It looks like a clear domain (like google.com, facebook.com, sahidsheikh.in)
-                      // Strip any leading www. so we can add it cleanly if needed
                       const cleanQuery = query.replace(/^\s*(www\.)/i, "").replace(/\s+/g, "");
                       url = `https://www.${cleanQuery}`;
                     } else {
-                      // It's a general topic query, fall back to Google Search
                       url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
                     }
                   }
                   
                   this.onCommand(url);
                   
-                  // Send tool response back to Gemini session through proxy
+                  // Send tool response back to Gemini session
                   if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                     this.ws.send(JSON.stringify({
-                       type: "toolResponse",
-                       response: {
-                         functionResponses: [{
-                           name: call.name,
-                           id: call.id,
-                           response: { result: "Action executed successfully in the browser." }
-                         }]
-                       }
-                     }));
+                    const responsePayload = {
+                      functionResponses: [{
+                        name: call.name,
+                        id: call.id,
+                        response: { result: "Action executed successfully in the browser." }
+                      }]
+                    };
+
+                    if (this.useDirectGoogleWs) {
+                      this.ws.send(JSON.stringify({
+                        toolResponse: responsePayload
+                      }));
+                    } else {
+                      this.ws.send(JSON.stringify({
+                        type: "toolResponse",
+                        response: responsePayload
+                      }));
+                    }
                   }
                 }
               }
@@ -191,12 +313,13 @@ export class LiveSessionManager {
       };
 
       this.ws.onclose = () => {
-        console.log("[WS Client] Local proxy WebSocket closed.");
+        console.log("[WS Client] Live WebSocket connection terminated.");
         this.stop();
+        this.onClose();
       };
 
       this.ws.onerror = (err) => {
-        console.error("[WS Client] Local proxy WebSocket connection error:", err);
+        console.error("[WS Client] Live WebSocket error observed:", err);
         this.stop();
       };
 
@@ -210,7 +333,6 @@ export class LiveSessionManager {
     if (!this.playbackContext || this.isMuted) return;
     
     try {
-      // Auto-resume playback context if suspended during active session
       if (this.playbackContext.state === "suspended") {
         this.playbackContext.resume().catch(() => {});
       }
@@ -295,7 +417,19 @@ export class LiveSessionManager {
 
   sendText(text: string) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "text", text }));
+      if (this.useDirectGoogleWs) {
+        this.ws.send(JSON.stringify({
+          clientContent: {
+            turns: [{
+              role: "user",
+              parts: [{ text }]
+            }],
+            turnComplete: true
+          }
+        }));
+      } else {
+        this.ws.send(JSON.stringify({ type: "text", text }));
+      }
     }
   }
 }

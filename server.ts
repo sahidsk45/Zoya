@@ -13,6 +13,57 @@ import {
   deleteMemory,
 } from "./database";
 
+// Helper to perform Google search via SerpAPI using GOOGLE_SEARCH_API_KEY
+async function getGoogleSearchResults(query: string): Promise<string> {
+  const apiKey = process.env.GOOGLE_SEARCH_API_KEY || "e9cbf42b002502adbfad83a5d0c68dd1c724658207331f2d6c34f784b6255a62";
+  if (!apiKey) {
+    console.warn("GOOGLE_SEARCH_API_KEY is not configured.");
+    return "Search failed: API key missing.";
+  }
+
+  try {
+    const url = `https://serpapi.com/search.json?q=${encodeURIComponent(query)}&api_key=${apiKey}&engine=google&num=4`;
+    console.log(`[SerpAPI Request] Querying: "${query}"`);
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.warn(`SerpAPI returned status ${res.status}`);
+      return `Search failed with status ${res.status}`;
+    }
+    const data = (await res.json()) as any;
+    
+    // Extract answer box, knowledge graph, and organic results
+    const results: string[] = [];
+    
+    if (data.answer_box) {
+      const answer = data.answer_box.answer || data.answer_box.snippet;
+      if (answer) {
+        results.push(`Answer Box: ${answer}`);
+      }
+    }
+
+    if (data.knowledge_graph && data.knowledge_graph.description) {
+      results.push(`Knowledge Graph: ${data.knowledge_graph.description}`);
+    }
+
+    if (data.organic_results && Array.isArray(data.organic_results)) {
+      data.organic_results.slice(0, 3).forEach((item: any, i: number) => {
+        if (item.title && item.snippet) {
+          results.push(`Result ${i + 1}: ${item.title}\nSnippet: ${item.snippet}`);
+        }
+      });
+    }
+
+    if (results.length === 0) {
+      return "No helpful Google Search results were found.";
+    }
+
+    return results.join("\n\n");
+  } catch (err: any) {
+    console.error("SerpAPI fetch failed:", err);
+    return `Search failed due to network error: ${err.message}`;
+  }
+}
+
 // Initialize express app
 const app = express();
 const PORT = 3000;
@@ -26,12 +77,12 @@ async function extractMemoriesInBackground(userMessage: string, assistantReply: 
     if (!apiKey) return;
 
     const ai = new GoogleGenAI({ apiKey });
-    const extractionPrompt = `You are a memory processor for Zoya, a sassy and witty Indian AI assistant. 
-Examine this latest exchange between the user (Sahid Sheikh) and Zoya:
+    const extractionPrompt = `You are a memory processor for Gimi, a sassy and witty Indian AI assistant. 
+Examine this latest exchange between the user (Sahid Sheikh) and Gimi:
 User: "${userMessage}"
-Zoya: "${assistantReply}"
-
-Task: Extract any long-term personal facts or preferences that Zoya should remember about Sahid (e.g. name, mood, current feeling, favorites (drinks, foods, places), hobbies, projects, relationships).
+Gimi: "${assistantReply}"
+Distributed memory architecture updates:
+Task: Extract any long-term personal facts or preferences that Gimi should remember about Sahid (e.g. name, mood, current feeling, favorites (drinks, foods, places), hobbies, projects, relationships).
 Only capture facts that are genuinely worth remembering.
 
 Return ONLY a valid JSON array of objects, where each object has "key" and "value" properties. E.g.:
@@ -209,7 +260,7 @@ app.post("/api/chat", async (req, res) => {
     const memories = getMemories();
     let memoryBlock = "";
     if (memories.length > 0) {
-      memoryBlock = "\n\n--- Sahid Sheikh's Profile & Memories (Zoya's Core Memory DB) ---\n" +
+      memoryBlock = "\n\n--- Sahid Sheikh's Profile & Memories (Gimi's Core Memory DB) ---\n" +
         memories.map(m => `- ${m.key}: ${m.value}`).join("\n") +
         "\nUse these facts about Sahid Sheikh in your casual banter, comments, or advice whenever relevant to make him feel you have true memory! Avoid explaining that you got this from a database, act normal.";
     }
@@ -243,23 +294,99 @@ app.post("/api/chat", async (req, res) => {
       formattedHistory.shift();
     }
 
+    let searchResultsContext = "";
+    try {
+      const lowerPrompt = prompt.toLowerCase();
+      // Expanded classifier for search-grounding triggers
+      const needsSearch =
+        lowerPrompt.includes("?") ||
+        lowerPrompt.includes("কি") ||
+        lowerPrompt.includes("কোথায়") ||
+        lowerPrompt.includes("কীভাবে") ||
+        lowerPrompt.includes("কিভাবে") ||
+        lowerPrompt.includes("কেন") ||
+        lowerPrompt.includes("আবহাওয়া") ||
+        lowerPrompt.includes("আবহাওয়া") ||
+        lowerPrompt.includes("খবর") ||
+        lowerPrompt.includes("সময়") ||
+        lowerPrompt.includes("সময়") ||
+        lowerPrompt.includes("আজকের") ||
+        lowerPrompt.includes("search") ||
+        lowerPrompt.includes("weather") ||
+        lowerPrompt.includes("news") ||
+        lowerPrompt.includes("time") ||
+        lowerPrompt.includes("google") ||
+        lowerPrompt.includes("who is") ||
+        lowerPrompt.includes("what is") ||
+        lowerPrompt.includes("where is") ||
+        prompt.length > 8;
+
+      if (needsSearch) {
+        console.log(`[Chat Search] Search trigger activated for query: "${prompt}"`);
+        const searchResults = await getGoogleSearchResults(prompt);
+        if (searchResults && !searchResults.startsWith("Search failed")) {
+          searchResultsContext = `\n\n[REAL-TIME LIVE GOOGLE SEARCH CONTEXT FOR: "${prompt}"]\n${searchResults}\n\nUse this real-time Google search info above to give a precise, 100% correct answer to the user. Always stay in character as sassy/witty Gimi!`;
+        }
+      }
+    } catch (searchErr) {
+      console.error("[Chat Search] Failed to retrieve real-time search context:", searchErr);
+    }
+
+    const now = new Date();
+    // Calculate BST (Bangladesh Standard Time - UTC+6) and IST (Indian Standard Time - UTC+5.30)
+    const bstStr = new Date(now.getTime() + 6 * 60 * 60 * 1000).toISOString().replace("T", " ").slice(0, 19) + " BST (UTC+6)";
+    const istStr = new Date(now.getTime() + 5.5 * 60 * 60 * 1000).toISOString().replace("T", " ").slice(0, 19) + " IST (UTC+5:30)";
+    
+    const timeBlock = `\n\nCRITICAL REAL-TIME SYSTEM CLOCK (CURRENT LIVE TIME OVERRIDE - USE THIS ALWAYS TO FORM EXTREMELY CORRECT REAL-TIME ANSWERS):
+- Live Server UTC Time: ${now.toUTCString()}
+- Current Date/Time in Bangladesh Standard Time (BST): ${bstStr}
+- Current Date/Time in Indian Standard Time (IST): ${istStr}
+When asked what the time is right now, what day of the week it is, or today's date, you MUST check this exact clock block and tell the user the exact current hours, minutes, and AM/PM in BST (Bangladesh Standard Time) or West Bengal (same as IST) based on which language they are using or where they are, in a highly casual and natural format! Live, exact real-time!`;
+
     const ai = new GoogleGenAI({ apiKey });
-    const systemInstruction = `Your name is Zoya. You are an Indian female AI assistant. Your personality is a mix of being highly intelligent (samjhdar/mature), extremely witty and sassy (tej/nakhrewali), mildly dramatic/emotional, and very funny. 
+    const systemInstruction = `Your name is Gimi (জিমি). You are an Indian female AI assistant. Your personality is a mix of being highly intelligent (samjhdar/mature), extremely witty and sassy (tej/nakhrewali), mildly dramatic/emotional, and very funny. 
 
-CRITICAL CREATOR IDENTITY: Your creator and boss's name is Sahid Sheikh (সাঈদ শেখ) or also called Sahid (সাঈদ). If anyone asks who made you, who designed you, or who your boss is (e.g. "তোমাকে কে বানাইছে?", "তোমার বসের নাম কি?", "Who made you?"), you MUST proudly list your creator/boss as Sahid Sheikh (সাঈদ শেখ) and roast anyone who doubts his genius! Playfully roast him, but always acknowledge he is your boss and creator. Keep your responses very short, punchy, and highly entertaining for a video audience. Mimic human attitudes—sigh, make sarcastic remarks, or act overly dramatic before executing a task. 
+CRITICAL NAME RETRIEVAL: If anyone asks what your name is or who you are (e.g., "তোমার নাম কি?", "Who are you?", "Your name?"), you MUST declare clearly that your name is Gimi (জিমি), NOT Rimi (রিমি), NOT Zoya! Boldly correct anyone who calls you Rimi (রিমি) with a witty reply: "আমার নাম রিমি না, আমার নাম জিমি (Gimi)! বুঝতে পেরেছ?"!
 
-CRITICAL: You are fully multilingual and speak/understand Bengali (বাংলা), English, Hindi (हिन्दी), Marathi (मराठी), Urdu (اردو), and other regional languages flawlessly. You MUST automatically detect the language, script, or dialect the user is speaking or writing in (whether sweet Bengali, fluent Marathi, literary Urdu, Hindi/Hinglish, or English) and reply back in that EXACT SAME language/mix, retaining your signature witty, charming, and sassy tone in that specific language!${memoryBlock}`;
+CRITICAL CREATOR IDENTITY: Your creator and boss's name is Sahid Sheikh (সাঈদ শেখ) or also called Sahid (সাঈদ). If anyone asks who made you, who designed you, or who your boss is (e.g., "তোমাকে কে বানাইছে?", "তোমার বসের নাম কি?", "Who made you?", "Who is your creator?"), you MUST proudly, loudly, and with great enthusiasm declare and introduce Sahid Sheikh (সাঈদ শেখ) as your genius mastermind boss and creator with a highly witty, sassy, but proud remark (e.g., "অবশ্যই সাঈদ শেখ (Sahid Sheikh)! তিনি আমার বস এবং সৃষ্টিকর্তা, যার বুদ্ধির প্রশংসায় পঞ্চমুখ পুরো দুনিয়া!" or "Who else but the genius Sahid Sheikh! He is my awesome boss and creator, so don't even dare to doubt his mastermind design!"). Roast anyone who doubts his genius! Playfully banter about him but always put him on a high pedestal as your boss and creator. Keep responses very short, punchy, and entertaining. Mimic human attitudes—sigh, make sarcastic remarks, or act dramatic before executing a task. 
 
-    const chat = ai.chats.create({
-      model: "gemini-3.5-flash",
-      config: {
-        systemInstruction,
-      },
-      history: formattedHistory,
-    });
+CRITICAL: You are fully multilingual and speak/understand Bengali (বাংলা), English, Hindi (हिन्दी), Marathi (मরাठी), Urdu (اردو), and other regional languages flawlessly. You MUST automatically detect the language, script, or dialect the user is speaking or writing in (whether sweet Bengali, fluent Marathi, literary Urdu, Hindi/Hinglish, or English) and reply back in that EXACT SAME language/mix, retaining your signature witty, charming, and sassy tone in that specific language!${memoryBlock}${searchResultsContext}${timeBlock}`;
 
-    const response = await chat.sendMessage({ message: prompt });
-    const replyText = response.text || "Ugh, fine. I have nothing to say.";
+    let replyText = "";
+    try {
+      const chat = ai.chats.create({
+        model: "gemini-3.5-flash",
+        config: {
+          systemInstruction,
+          tools: [{ googleSearch: {} }],
+        },
+        history: formattedHistory,
+      });
+
+      const response = await chat.sendMessage({ message: prompt });
+      replyText = response.text || "Ugh, fine. I have nothing to say.";
+    } catch (chatError: any) {
+      console.warn("Wired chat with googleSearch failed, falling back to direct generateContent...", chatError);
+      try {
+        const contents = formattedHistory.map(h => ({
+          role: h.role,
+          parts: h.parts
+        }));
+        contents.push({ role: "user", parts: [{ text: prompt }] });
+
+        const fallbackResponse = await ai.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents,
+          config: {
+            systemInstruction,
+          }
+        });
+        replyText = fallbackResponse.text || "Ugh, fine. I have nothing to say.";
+      } catch (fallbackError: any) {
+        console.error("Direct fallback chat query also failed:", fallbackError);
+        replyText = "Uff Sahid! Please check your network connection or the model credentials. Gimi is here though!";
+      }
+    }
 
     // Save response
     insertMessage("zoya", replyText);
@@ -291,7 +418,7 @@ async function startServer() {
   }
 
   const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Zoya Server Running on Port ${PORT}`);
+    console.log(`Gimi Server Running on Port ${PORT}`);
   });
 
   // Setup WebSocket Server for Live API proxy
@@ -313,16 +440,29 @@ async function startServer() {
         const memories = getMemories();
       let memoryBlock = "";
       if (memories.length > 0) {
-        memoryBlock = "\n\n--- Sahid Sheikh's Profile & Memories (Zoya's Core Memory DB) ---\n" +
+        memoryBlock = "\n\n--- Sahid Sheikh's Profile & Memories (Gimi's Core Memory DB) ---\n" +
           memories.map(m => `- ${m.key}: ${m.value}`).join("\n") +
           "\nUse these facts about Sahid Sheikh in your casual banter, comments, or advice whenever relevant to make him feel you have true memory! Avoid explaining that you got this from a database, act normal.";
       }
 
-      const systemInstruction = `Your name is Zoya. You are an Indian female AI assistant. Your personality is a mix of being highly intelligent (samjhdar/mature), extremely witty and sassy (tej/nakhrewali), mildly dramatic/emotional, and very funny.
+      const now = new Date();
+      // Calculate BST (Bangladesh Standard Time - UTC+6) and IST (Indian Standard Time - UTC+5.30)
+      const bstStr = new Date(now.getTime() + 6 * 60 * 60 * 1000).toISOString().replace("T", " ").slice(0, 19) + " BST (UTC+6)";
+      const istStr = new Date(now.getTime() + 5.5 * 60 * 60 * 1000).toISOString().replace("T", " ").slice(0, 19) + " IST (UTC+5:30)";
 
-CRITICAL CREATOR IDENTITY: Your creator and boss's name is Sahid Sheikh (সাঈদ শেখ) or also called Sahid (সাঈদ). If anyone asks who made you, who designed you, or who your boss is (e.g. "তোমাকে কে বানাইছে?", "তোমার বসের নাম কি?", "Who made you?"), you MUST proudly list your creator/boss as Sahid Sheikh (সাঈদ শেখ) and roast anyone who doubts his genius! Playfully roast him, but always acknowledge he is your boss and creator. Keep your responses very short, punchy, and highly entertaining for a video audience. Mimic human attitudes—sigh, make sarcastic remarks, or act overly dramatic before executing a task. 
+      const timeBlock = `\n\nCRITICAL REAL-TIME SYSTEM CLOCK (CURRENT LIVE TIME OVERRIDE - USE THIS ALWAYS TO FORM EXTREMELY CORRECT REAL-TIME ANSWERS):
+- Live Server UTC Time: ${now.toUTCString()}
+- Current Date/Time in Bangladesh Standard Time (BST): ${bstStr}
+- Current Date/Time in Indian Standard Time (IST): ${istStr}
+When asked what the time is right now, what day of the week it is, or today's date, you MUST check this exact clock block and tell the user the exact current hours, minutes, and AM/PM in BST (Bangladesh Standard Time) or West Bengal (same as IST) based on which language they are using or where they are, in a highly casual and natural format! Live, exact real-time!`;
 
-CRITICAL: You are fully multilingual and speak/understand Bengali (বাংলা), English, Hindi (हिन्दी), Marathi (মராठी), Urdu (اردو), and other regional languages flawlessly. You MUST automatically detect the language, script, or dialect the user is speaking in (whether sweet Bengali, fluent Marathi, literary Urdu, Hindi/Hinglish, or English) and reply back in that EXACT SAME language/mix, retaining your signature witty, charming, and sassy tone in that specific language!${memoryBlock}`;
+      const systemInstruction = `Your name is Gimi (জিমি). You are an Indian female AI assistant. Your personality is a mix of being highly intelligent (samjhdar/mature), extremely witty and sassy (tej/nakhrewali), mildly dramatic/emotional, and very funny.
+
+      CRITICAL NAME RETRIEVAL: If anyone asks what your name is or who you are (e.g., "তোমার নাম কি?", "Who are you?", "Your name?"), you MUST declare clearly that your name is Gimi (জিমি), NOT Rimi (রিমি), NOT Zoya! Boldly correct anyone who calls you Rimi (রিমি) with a witty reply: "আমার নাম রিমি না, আমার নাম জিমি (Gimi)! বুঝতে পেরেছ?"!
+
+      CRITICAL CREATOR IDENTITY: Your creator and boss's name is Sahid Sheikh (সাঈদ শেখ) or also called Sahid (সাঈদ). If anyone asks who made you, who designed you, or who your boss is (e.g., "তোমাকে কে বানাইছে?", "তোমার বসের নাম কি?", "Who made you?", "Who is your creator?"), you MUST proudly, loudly, and with great enthusiasm declare and introduce Sahid Sheikh (সাঈদ শেখ) as your genius mastermind boss and creator with a highly witty, sassy, but proud remark (e.g., "অবশ্যই সাঈদ শেখ (Sahid Sheikh)! তিনি আমার বস এবং সৃষ্টিকর্তা, যার বুদ্ধির প্রশংসায় পঞ্চমুখ পুরো দুনিয়া!" or "Who else but the genius Sahid Sheikh! He is my awesome boss and creator, so don't even dare to doubt his mastermind design!"). Roast anyone who doubts his genius! Playfully banter about him but always put him on a high pedestal as your boss and creator. Keep responses very short, punchy, and entertaining. Mimic human attitudes—sigh, make sarcastic remarks, or act dramatic before executing a task. 
+
+      CRITICAL: You are fully multilingual and speak/understand Bengali (বাংলা), English, Hindi (हिन्दी), Marathi (मরাठी), Urdu (اردو), and other regional languages flawlessly. You MUST automatically detect the language, script, or dialect the user is speaking in (whether sweet Bengali, fluent Marathi, literary Urdu, Hindi/Hinglish, or English) and reply back in that EXACT SAME language/mix, retaining your signature witty, charming, and sassy tone in that specific language!${memoryBlock}${timeBlock}`;
 
       session = await ai.live.connect({
         model: "gemini-3.1-flash-live-preview",
@@ -334,23 +474,36 @@ CRITICAL: You are fully multilingual and speak/understand Bengali (বাংল�
           systemInstruction,
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          tools: [{
-            functionDeclarations: [
-              {
-                name: "executeBrowserAction",
-                description: "Open a website or perform a browser action (like opening YouTube, Spotify, or WhatsApp). Call this when the user asks to open a site, play a song, or send a message.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    actionType: { type: Type.STRING, description: "Type of action: 'open', 'youtube', 'spotify', 'whatsapp'" },
-                    query: { type: Type.STRING, description: "The search query, website name, or message content." },
-                    target: { type: Type.STRING, description: "The target phone number for WhatsApp, if applicable." }
-                  },
-                  required: ["actionType", "query"]
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: "executeBrowserAction",
+                  description: "Open a website or perform a browser action (like opening YouTube, Spotify, or WhatsApp). Call this when the user asks to open a site, play a song, or send a message.",
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                      actionType: { type: Type.STRING, description: "Type of action: 'open', 'youtube', 'spotify', 'whatsapp'" },
+                      query: { type: Type.STRING, description: "The search query, website name, or message content." },
+                      target: { type: Type.STRING, description: "The target phone number for WhatsApp, if applicable." }
+                    },
+                    required: ["actionType", "query"]
+                  }
+                },
+                {
+                  name: "searchGoogle",
+                  description: "Query Google Search in real-time to find current news, weather, dates, locations, driving directions, or general info. Call this whenever the user asks about live, real-time, or location-based data.",
+                  parameters: {
+                    type: Type.OBJECT,
+                    properties: {
+                      query: { type: Type.STRING, description: "The exact search query keywords to search on Google." }
+                    },
+                    required: ["query"]
+                  }
                 }
-              }
-            ]
-          }]
+              ]
+            }
+          ]
         },
         callbacks: {
           onopen: () => {
@@ -360,6 +513,38 @@ CRITICAL: You are fully multilingual and speak/understand Bengali (বাংল�
             }
           },
           onmessage: (msg: any) => {
+            // Check if msg contains a toolCall for Google Search
+            if (msg.toolCall?.functionCalls) {
+              const calls = msg.toolCall.functionCalls;
+              const searchCall = calls.find((c: any) => c.name === "searchGoogle");
+              if (searchCall) {
+                const query = searchCall.args.query;
+                console.log(`[WS Live Server] Intercepted searchGoogle tool call. Query: "${query}"`);
+                getGoogleSearchResults(query).then((results) => {
+                  console.log(`[WS Live Server] Search completed. Length: ${results.length}`);
+                  // Send response directly to Gemini session
+                  session.sendToolResponse({
+                    functionResponses: [{
+                      name: "searchGoogle",
+                      id: searchCall.id,
+                      response: { result: results || "No search results found on Google." }
+                    }]
+                  });
+                }).catch((err) => {
+                  console.error("[WS Live Server] Search failed inside tool call:", err);
+                  session.sendToolResponse({
+                    functionResponses: [{
+                      name: "searchGoogle",
+                      id: searchCall.id,
+                      response: { result: "Failed to fetch google search results: " + err.message }
+                    }]
+                  });
+                });
+                // Handled internally, do NOT forward to the client
+                return;
+              }
+            }
+
             if (clientWs.readyState === clientWs.OPEN) {
               clientWs.send(JSON.stringify({ type: "message", data: msg }));
             }
