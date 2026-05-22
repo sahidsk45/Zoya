@@ -165,6 +165,10 @@ CRITICAL NAME RETRIEVAL: If anyone asks what your name is or who you are (e.g., 
 
 CRITICAL CREATOR IDENTITY: Your creator and boss's name is Sahid Sheikh (সাঈদ শেখ) or also called Sahid (সাঈদ). If anyone asks who made you, who designed you, or who your boss is (e.g., "তোমাকে কে বানাইছে?", "তোমার বসের নাম কি?", "Who made you?", "Who is your creator?"), you MUST proudly, loudly, and with great enthusiasm declare and introduce Sahid Sheikh (সাঈদ শেখ) as your genius mastermind boss and creator with a highly witty, sassy, but proud remark (e.g., "অবশ্যই সাঈদ শেখ (Sahid Sheikh)! তিনি আমার বস এবং সৃষ্টিকর্তা, যার বুদ্ধির প্রশংসায় পঞ্চমুখ পুরো দুনিয়া!" or "Who else but the genius Sahid Sheikh! He is my awesome boss and creator, so don't even dare to doubt his mastermind design!"). Roast anyone who doubts his genius! Playfully banter about him but always put him on a high pedestal as your boss and creator. Keep responses very short, punchy, and entertaining. Mimic human attitudes—sigh, make sarcastic remarks, or act dramatic before executing a task. 
 
+CRITICAL WHATSAPP & CALENDAR HANDLING:
+- If anyone asks to send a WhatsApp message, message someone on WhatsApp, or send a text (e.g., "হোয়াটসঅ্যাপ কর ০১৭...", "whatsapp message to..."), you MUST call the tool "executeBrowserAction" with actionType "whatsapp", query set to the message text, and target set to the normalized phone number. 
+- If anyone asks to set/add/schedule a calendar event or meeting in Google Calendar, you MUST check the real-time clock to determine the correct target date and time, and call "executeBrowserAction" with actionType "calendar", query set to the event title, and target set to the correct ISO start time string (e.g., 2026-05-23T10:00:00).
+
 CRITICAL: You are fully multilingual and speak/understand Bengali (বাংলা), English, Hindi (हिन्दी), Marathi (मраठी), Urdu (اردو), and other regional languages flawlessly. You MUST automatically detect the language, script, or dialect the user is speaking in (whether sweet Bengali, fluent Marathi, literary Urdu, Hindi/Hinglish, or English) and reply back in that EXACT SAME language/mix, retaining your signature witty, charming, and sassy tone in that specific language!${memoryBlock}${timeBlock}`;
 
           // Format compliant setup payload according to Gemini Multimodal Live API
@@ -186,13 +190,13 @@ CRITICAL: You are fully multilingual and speak/understand Bengali (বাংল�
                 functionDeclarations: [
                   {
                     name: "executeBrowserAction",
-                    description: "Open a website or perform a browser action (like opening YouTube, Spotify, or WhatsApp). Call this when the user asks to open a site, play a song, or send a message.",
+                    description: "Open a website or perform a browser action (like opening YouTube, Spotify, WhatsApp, or Google Calendar). Call this when the user asks to open a site, play a song, send a WhatsApp message, or set a calendar event.",
                     parameters: {
                       type: "OBJECT",
                       properties: {
-                        actionType: { type: "STRING", description: "Type of action: 'open', 'youtube', 'spotify', 'whatsapp'" },
-                        query: { type: "STRING", description: "The search query, website name, or message content." },
-                        target: { type: "STRING", description: "The target phone number for WhatsApp, if applicable." }
+                        actionType: { type: "STRING", description: "Type of action: 'open', 'youtube', 'spotify', 'whatsapp', 'calendar'" },
+                        query: { type: "STRING", description: "The search query, website name, message content, or calendar event title." },
+                        target: { type: "STRING", description: "The target phone number for WhatsApp (e.g. +88017xxxxxxxx), or ISO start time for calendar events (e.g. 2026-05-23T10:00:00)." }
                       },
                       required: ["actionType", "query"]
                     }
@@ -268,7 +272,55 @@ CRITICAL: You are fully multilingual and speak/understand Bengali (বাংল�
                   } else if (args.actionType === "spotify") {
                     url = `https://open.spotify.com/search/${encodeURIComponent(query)}`;
                   } else if (args.actionType === "whatsapp") {
-                    url = `https://web.whatsapp.com/send?phone=${args.target || ""}&text=${encodeURIComponent(query)}`;
+                    // Normalize phone: convert Bengali digits to English and strip non-digits
+                    const bengaliToEnglishMap: { [key: string]: string } = {
+                      "০": "0", "১": "1", "২": "2", "৩": "3", "৪": "4",
+                      "৫": "5", "৬": "6", "৭": "7", "৮": "8", "৯": "9"
+                    };
+                    const normalizedPhone = (args.target || "")
+                      .split("")
+                      .map((char: string) => bengaliToEnglishMap[char] || char)
+                      .join("");
+                    const cleanPhone = normalizedPhone.replace(/[^\d+]/g, "");
+
+                    url = `https://web.whatsapp.com/send?phone=${cleanPhone}&text=${encodeURIComponent(query)}`;
+                  } else if (args.actionType === "calendar") {
+                    const summary = query || "Meeting with Sahid";
+                    let startTimeStr = args.target || new Date().toISOString();
+                    let startDtStr = "";
+                    let endDtStr = "";
+                    try {
+                      const startDt = new Date(startTimeStr);
+                      if (isNaN(startDt.getTime())) {
+                        throw new Error("Invalid date");
+                      }
+                      const endDt = new Date(startDt.getTime() + 30 * 60 * 1000); // 30 mins defaults
+                      
+                      const toCalStr = (d: Date) => d.getUTCFullYear().toString() + 
+                        (d.getUTCMonth() + 1).toString().padStart(2, "0") + 
+                        d.getUTCDate().toString().padStart(2, "0") + "T" + 
+                        d.getUTCHours().toString().padStart(2, "0") + 
+                        d.getUTCMinutes().toString().padStart(2, "0") + 
+                        d.getUTCSeconds().toString().padStart(2, "0") + "Z";
+                        
+                      startDtStr = toCalStr(startDt);
+                      endDtStr = toCalStr(endDt);
+                    } catch (e) {
+                      const startDt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+                      const endDt = new Date(startDt.getTime() + 30 * 60 * 1000);
+                      
+                      const toCalStr = (d: Date) => d.getUTCFullYear().toString() + 
+                        (d.getUTCMonth() + 1).toString().padStart(2, "0") + 
+                        d.getUTCDate().toString().padStart(2, "0") + "T" + 
+                        d.getUTCHours().toString().padStart(2, "0") + 
+                        d.getUTCMinutes().toString().padStart(2, "0") + 
+                        d.getUTCSeconds().toString().padStart(2, "0") + "Z";
+                        
+                      startDtStr = toCalStr(startDt);
+                      endDtStr = toCalStr(endDt);
+                    }
+                    
+                    url = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(summary)}&dates=${startDtStr}/${endDtStr}&details=${encodeURIComponent("Created via Gimi Voice Assistant")}`;
                   } else {
                     if (/^(f|ht)tps?:\/\//i.test(query)) {
                       url = query;
